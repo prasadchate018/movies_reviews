@@ -1,24 +1,28 @@
-import pickle
 import os
+import pickle
 from flask import Flask, request, render_template, jsonify
 
 app = Flask(__name__)
 
-# Load model and vectorizer/preprocessor securely
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'model.pkl')
-VECTORIZER_PATH = os.path.join(os.path.dirname(__file__), 'vectorizer.pkl')
+# Resolve absolute paths relative to the current file location
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, 'model.pkl')
+VECTORIZER_PATH = os.path.join(BASE_DIR, 'vectorizer.pkl')
 
-model = None
-vectorizer = None
+def load_pkl(path):
+    """Safely load pickle files if they exist."""
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Error loading pickle file at {path}: {str(e)}")
+            return None
+    return None
 
-try:
-    with open(MODEL_PATH, 'rb') as f:
-        model = pickle.load(f)
-    if os.path.exists(VECTORIZER_PATH):
-        with open(VECTORIZER_PATH, 'rb') as f:
-            vectorizer = pickle.load(f)
-except Exception as e:
-    print(f"Error loading model artifacts: {e}")
+# Load model and vectorizer at app initialization
+model = load_pkl(MODEL_PATH)
+vectorizer = load_pkl(VECTORIZER_PATH)
 
 @app.route('/', methods=['GET'])
 def index():
@@ -26,40 +30,51 @@ def index():
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if not model:
-        return jsonify({'error': 'Model not loaded correctly.'}), 500
+    # Diagnostic check: ensure model is loaded
+    if model is None:
+        return render_template(
+            'index.html', 
+            error="Server Error: Model file (model.pkl) failed to load or is missing on Vercel."
+        )
 
     try:
-        data = request.form.get('text_input', '')
-        
-        if not data:
+        user_text = request.form.get('text_input', '').strip()
+
+        if not user_text:
             return render_template('index.html', error="Please enter text to analyze.")
 
-        # Transform input if vectorizer exists, otherwise format directly
-        if vectorizer:
-            transformed_input = vectorizer.transform([data])
-            prediction = model.predict(transformed_input)[0]
-            
-            # Retrieve probabilities if supported
-            if hasattr(model, "predict_proba"):
-                probs = model.predict_proba(transformed_input)[0]
-                confidence = round(max(probs) * 100, 2)
-            else:
-                confidence = None
+        # Vectorization/Preprocessing step
+        if vectorizer is not None:
+            features = vectorizer.transform([user_text])
         else:
-            prediction = model.predict([data])[0]
-            confidence = None
+            features = [user_text]
+
+        # Model Inference
+        prediction = model.predict(features)[0]
+
+        # Calculate confidence score if supported by the model
+        confidence = None
+        if hasattr(model, "predict_proba"):
+            try:
+                probs = model.predict_proba(features)[0]
+                confidence = round(float(max(probs)) * 100, 2)
+            except Exception:
+                confidence = None
 
         return render_template(
             'index.html', 
             prediction=prediction, 
             confidence=confidence, 
-            user_input=data
+            user_input=user_text
         )
 
     except Exception as e:
-        return render_template('index.html', error=f"Prediction error: {str(e)}")
+        # Catch runtime inference errors gracefully without crashing the server
+        return render_template(
+            'index.html', 
+            error=f"Prediction Error: {str(e)}"
+        )
 
-# Vercel needs the app object to be exposed directly
+# Required for local testing; Vercel imports 'app' automatically
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
